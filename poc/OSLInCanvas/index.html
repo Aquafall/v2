@@ -1,0 +1,787 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>OSLRunner — standalone canvas OSL runtime</title>
+  <style>
+    body { background:#0b0b0b; color:#ddd; font-family:system-ui,Segoe UI,Roboto,sans-serif; display:flex; gap:12px; padding:18px; }
+    #demoWrap { width:420px; border:1px solid #222; background:#000; }
+    #log { width:420px; max-height:420px; overflow:auto; background:#070707; border:1px solid #222; padding:8px; font-size:13px; color:#9f9; }
+  </style>
+</head>
+<body>
+  <div id="demoWrap"></div>
+  <div id="log"></div>
+
+<script>
+/*
+  OSLRunner v0.1 — standalone canvas-based OSL interpreter.
+  - Exposes global class OSLRunner(containerElement, sourceString, options)
+  - Methods: start(), stop()
+  - Options: { onLog: (msg)=>void }
+  - Intentionally small: tokenizer, simple parser, AST interpreter, canvas renderer.
+  - Focused on the OSL flavor you provided: assignments, window props, button/text, if/else, goto offsets, if onclick blocks.
+*/
+
+// -------------------------
+// Utility: simple logger
+// -------------------------
+function defaultLogger(msg){
+  const out = document.getElementById('log');
+  if (out) {
+    const d = document.createElement('div'); d.textContent = msg; out.appendChild(d); out.scrollTop = out.scrollHeight;
+  } else console.log(msg);
+}
+
+// -------------------------
+// Tokenizer (line based)
+// -------------------------
+function tokenize(src){
+  const tokens=[];
+  const re = /\s*(?:(\/\/.*$)|(\"(?:\\.|[^\"])*\")|([A-Za-z_][A-Za-z0-9_\.]*)|(\d+(?:\.\d+)?)|(:)|(\()|(\))|([+\-*\/=])|(#(?:[0-9A-Fa-f]{3,8}))|(\.)|(.))/m;
+  const lines = src.split(/\r?\n/);
+  for (let ln=0; ln<lines.length; ln++){
+    let s = lines[ln];
+    let idx = 0;
+    while (idx < s.length){
+      const slice = s.slice(idx);
+      const m = re.exec(slice);
+      if (!m) break;
+      idx += m[0].length;
+      if (m[1]) { break; } // comment
+      if (m[2]) { tokens.push({type:'STRING', val: JSON.parse(m[2])}); continue; }
+      if (m[3]) { tokens.push({type:'IDENT', val:m[3]}); continue; }
+      if (m[4]) { tokens.push({type:'NUMBER', val:parseFloat(m[4])}); continue; }
+      if (m[5]) { tokens.push({type:'COLON'}); continue; }
+      if (m[6]) { tokens.push({type:'LPAREN'}); continue; }
+      if (m[7]) { tokens.push({type:'RPAREN'}); continue; }
+      if (m[8]) { tokens.push({type:'OP', val:m[8]}); continue; }
+      if (m[9]) { tokens.push({type:'COLOR', val:m[9]}); continue; }
+      if (m[10]) { tokens.push({type:'SYM', val:'.'}); continue; }
+      if (m[11]) { tokens.push({type:'SYMOTHER', val:m[11]}); continue; }
+    }
+    tokens.push({type:'NEWLINE'});
+  }
+  return tokens;
+}
+
+// -------------------------
+// Parser (simple, line-based)
+// -------------------------
+function parse(tokens){
+  let i = 0;
+  function peek(){ return tokens[i]; }
+  function next(){ return tokens[i++]; }
+  function eat(t){ if (peek() && peek().type === t) return next(); return null; }
+
+  const stmts = [];
+  while (i < tokens.length){
+    if (peek().type === 'NEWLINE'){ next(); continue; }
+    // import "mod"
+    if (peek().type === 'IDENT' && peek().val === 'import'){ next(); const s = eat('STRING'); stmts.push({type:'IMPORT', mod: s ? s.val : null}); while (peek() && peek().type !== 'NEWLINE') next(); continue; }
+
+    // if <cond> ( ... ) else ( ... )
+    if (peek().type === 'IDENT' && peek().val === 'if'){ next();
+      const condParts = [];
+      while (peek() && peek().type !== 'LPAREN' && peek().type !== 'NEWLINE') condParts.push(next());
+      const cond = condParts;
+      if (eat('LPAREN')){
+        const body = collectUntil('RPAREN');
+        // optional else
+        while (peek() && peek().type === 'NEWLINE') next();
+        let elseBody = null;
+        if (peek() && peek().type === 'IDENT' && peek().val === 'else'){ next();
+          if (eat('LPAREN')) elseBody = collectUntil('RPAREN');
+        }
+        stmts.push({type:'IF', cond, body, elseBody});
+      } else {
+        while (peek() && peek().type !== 'NEWLINE') next();
+      }
+      continue;
+    }
+
+    // goto x y (treat whole line)
+    if (peek().type === 'IDENT' && peek().val === 'goto'){ next();
+      const parts = [];
+      while (peek() && peek().type !== 'NEWLINE') parts.push(next());
+      stmts.push({type:'GOTO', parts});
+      continue;
+    }
+
+    // Generic line starting with IDENT -> could be assign or call
+    if (peek().type === 'IDENT'){
+      // consume until NEWLINE into lineTokens
+      const line = [];
+      while (peek() && peek().type !== 'NEWLINE') line.push(next());
+      // detect assign: IDENT [ . IDENT ] = ...
+      if (line.length >= 3 && line[1].type === 'OP' && line[1].val === '='){
+        const left = line[0];
+        const right = line.slice(2);
+        // left may be dotted: IDENT . IDENT . ...
+        const leftName = buildDottedName([left]);
+        stmts.push({type:'ASSIGN', left:leftName, right});
+        continue;
+      }
+      // dotted assign: IDENT . IDENT OP '=' ...
+      if (line.length >=5 && line[1].type==='SYM' && line[1].val==='.' && line[3].type==='OP' && line[3].val==='='){
+        const left = [line[0], line[2]];
+        const leftName = buildDottedName(left);
+        const right = line.slice(4);
+        stmts.push({type:'ASSIGN', left:leftName, right});
+        continue;
+      }
+      // otherwise call-like
+      const head = line[0];
+      const args = [];
+      let style = null;
+      for (let k=1;k<line.length;k++){
+        const t = line[k];
+        if (t.type === 'STRING') args.push({type:'STRING', val:t.val});
+        else if (t.type === 'NUMBER') args.push({type:'NUMBER', val:t.val});
+        else if (t.type === 'COLOR') args.push({type:'COLOR', val:t.val});
+        else if (t.type === 'COLON'){ style = line.slice(k+1).map(x => x.val || x.type).join(' '); break;}
+        else if (t.type === 'IDENT') args.push({type:'IDENT', val:t.val});
+        else {}
+      }
+      stmts.push({type:'CALL', name: head.val, args, style});
+      continue;
+    }
+
+    // otherwise skip to newline
+    while (peek() && peek().type !== 'NEWLINE') next();
+    next();
+  }
+
+  return {stmts};
+
+  function collectUntil(closeType){
+    const out = [];
+    let depth = 1;
+    while (i < tokens.length){
+      const t = next();
+      if (!t) break;
+      if (t.type === 'LPAREN') depth++;
+      else if (t.type === closeType){
+        depth--; if (depth===0) break;
+      }
+      out.push(t);
+    }
+    return out;
+  }
+
+  function buildDottedName(parts){
+    let name = '';
+    for (const p of parts){
+      if (name) name += '.';
+      name += (p.val || p.type);
+    }
+    return name;
+  }
+}
+
+// -------------------------
+// Very small expression evaluator (operates on token arrays)
+// Supports numbers, strings, identifiers, + - * /, dotted access and `len` property
+// Also detects function-like itemOwns(...) in expressions
+// -------------------------
+function evalExprTokens(tokens, runtime){
+  // convert tokens into a tiny AST (use the parser's fragment approach)
+  if (!tokens || tokens.length===0) return null;
+  // single token simple cases:
+  if (tokens.length === 1){
+    const t = tokens[0];
+    if (t.type === 'STRING') return t.val;
+    if (t.type === 'NUMBER') return t.val;
+    if (t.type === 'COLOR') return t.val;
+    if (t.type === 'IDENT') {
+      // dotted or var name
+      if (t.val.includes('.')) return getVar(runtime.vars, t.val);
+      if (runtime.vars[t.val] !== undefined) return runtime.vars[t.val];
+      return t.val; // fallback
+    }
+  }
+
+  // detect binary ops (left op right) only handle one operator for simplicity
+  for (let k=0;k<tokens.length;k++){
+    if (tokens[k].type === 'OP' && (tokens[k].val === '+' || tokens[k].val === '-' || tokens[k].val === '*' || tokens[k].val === '/')){
+      const left = evalExprTokens(tokens.slice(0,k), runtime);
+      const right = evalExprTokens(tokens.slice(k+1), runtime);
+      switch(tokens[k].val){
+        case '+': return (left||0) + (right||0);
+        case '-': return (left||0) - (right||0);
+        case '*': return (left||0) * (right||0);
+        case '/': return (left||0) / (right||0);
+      }
+    }
+  }
+
+  // fallback: join string tokens (e.g., msg.len -> compute)
+  // handle pattern IDENT . IDENT (like msg.len)
+  if (tokens.length >=3 && tokens[0].type==='IDENT' && tokens[1].type==='SYM' && tokens[1].val==='.' && tokens[2].type==='IDENT'){
+    const name = tokens.map(t => t.val || t.type).join('');
+    return getVar(runtime.vars, name);
+  }
+
+  // handle function-like itemOwns("uuid")
+  if (tokens[0].type === 'IDENT' && tokens[0].val === 'itemOwns' && tokens[1] && tokens[1].type === 'LPAREN'){
+    // naive: find first string inside
+    const strTok = tokens.find(t => t.type === 'STRING');
+    const uuid = strTok ? strTok.val : null;
+    return runtime._builtin_itemOwns(uuid);
+  }
+
+  return null;
+}
+
+function getVar(vars, dottedName){
+  const parts = dottedName.split('.');
+  let cur = vars;
+  for (const p of parts){
+    if (p === 'len'){
+      if (typeof cur === 'string' || Array.isArray(cur)) { cur = cur.length; continue; }
+    }
+    if (cur === undefined || cur === null) return undefined;
+    cur = cur[p];
+  }
+  return cur;
+}
+
+
+// -------------------------
+// OSLRunner class
+// -------------------------
+class OSLRunner {
+  constructor(container, source, options){
+    if (!container || !(container instanceof HTMLElement)) throw new Error('container HTMLElement required');
+    this.container = container;
+    this.source = source || '';
+    this.options = options || {};
+    this.onLog = this.options.onLog || defaultLogger;
+    this.running = false;
+
+    // canvas
+    this.canvas = document.createElement('canvas');
+    this.ctx = this.canvas.getContext('2d');
+    container.appendChild(this.canvas);
+
+    // runtime state
+    this.vars = { msg: "", window: { width: 400, height: 400 } };
+    this.ui = [];
+    this.offset = { x:0, y:0 };
+    this.mouse = { x:0, y:0, down:false };
+    this._raf = null;
+
+    // basic builtins (can be overridden by user)
+    this._builtin_itemOwns = (uuid) => {
+      return (this.vars._purchased && this.vars._purchased[uuid]) ? true : false;
+    };
+  }
+
+  log(m){ this.onLog(String(m)); }
+
+  start(){
+    if (this.running) return;
+    this.running = true;
+    // parse and execute init script
+    const tokens = tokenize(this.source);
+    this.log('tokens: '+tokens.length);
+    const ast = parse(tokens);
+    this.log('statements: '+ast.stmts.length);
+    this._ast = ast;
+    // initial pass executes statements (simple)
+    this.execAST(ast);
+    // attach input
+    this.setupInput();
+    this.resizeCanvas();
+    window.addEventListener('resize', ()=>this.resizeCanvas());
+    // attach onclicks via a post-scan
+    this.attachOnclickHandlersFromSource();
+    // run loop
+    this._loop();
+  }
+
+  stop(){
+    this.running = false;
+    if (this._raf) cancelAnimationFrame(this._raf);
+    this._raf = null;
+  }
+
+  setupInput(){
+    this.canvas.addEventListener('mousemove', e=>{
+      const r = this.canvas.getBoundingClientRect();
+      this.mouse.x = e.clientX - r.left;
+      this.mouse.y = e.clientY - r.top;
+    });
+    this.canvas.addEventListener('mouseup', e=>{
+      // click
+      const x = this.mouse.x - this.offset.x;
+      const y = this.mouse.y - this.offset.y;
+      for (const el of this.ui){
+        if (el.type === 'button'){
+          if (x >= el.x && x <= el.x + el.w && y >= el.y && y <= el.y + el.h){
+            if (el.onclick) el.onclick(this);
+          }
+        }
+      }
+    });
+  }
+
+  resizeCanvas(){
+    const w = (this.vars.window && this.vars.window.width) || 400;
+    const h = (this.vars.window && this.vars.window.height) || 400;
+    this.canvas.width = w;
+    this.canvas.height = h;
+    this.container.style.width = w + 'px';
+    this.container.style.height = h + 'px';
+  }
+
+  execAST(ast){
+    // reset UI and current color
+    this.ui = [];
+    this.currentColor = '#fff';
+    for (const s of ast.stmts) this.execStmt(s);
+  }
+
+  execStmt(s){
+    if (!s) return;
+    switch(s.type){
+      case 'IMPORT':
+        this.log('import '+s.mod);
+        break;
+      case 'ASSIGN':
+        {
+          const val = evalExprTokens(s.right, this);
+          // left could be dotted name string
+          setVarFromDotted(this.vars, s.left, val);
+          // update canvas sizing if window props changed
+          if (s.left.startsWith('window.')) this.resizeCanvas();
+        }
+        break;
+      case 'CALL':
+        this.execCall(s);
+        break;
+      case 'IF':
+        {
+          const condVal = evalExprTokens(s.cond, this);
+          if (condVal){
+            const subAst = parse(s.body);
+            this.execAST(subAst);
+          } else if (s.elseBody){
+            const elseAst = parse(s.elseBody);
+            this.execAST(elseAst);
+          }
+        }
+        break;
+      case 'GOTO':
+        {
+          // parts: treat as two expressions: take first half as x, second half as y
+          const parts = s.parts;
+          const split = Math.floor(parts.length/2);
+          const x = evalExprTokens(parts.slice(0, split), this) || 0;
+          const y = evalExprTokens(parts.slice(split), this) || 0;
+          this.offset.x = x; this.offset.y = y;
+        }
+        break;
+      default:
+        break;
+    }
+  }
+
+  execCall(call){
+    const name = call.name;
+    const args = call.args.map(a => {
+      if (a.type === 'STRING') return a.val;
+      if (a.type === 'NUMBER') return a.val;
+      if (a.type === 'COLOR') return a.val;
+      if (a.type === 'IDENT') return (this.vars[a.val] !== undefined) ? this.vars[a.val] : a.val;
+      return null;
+    });
+    if (name === 'rotur'){ this.log('rotur '+args.join(', ')); return; }
+    if (name === 'c'){ this.currentColor = args[0] || this.currentColor; return; }
+    if (name === 'window'){
+      if (args.length >= 2 && typeof args[0] === 'string'){
+        this.vars.window = this.vars.window || {};
+        this.vars.window[args[0]] = args[1];
+        this.resizeCanvas();
+      }
+      return;
+    }
+    if (name === 'button'){
+      const label = (args[0]!==undefined? args[0] : 'button') + '';
+      const x = Number(args[1] || 10);
+      const y = Number(args[2] || 10);
+      const size = Number(args[3] || 16);
+      const w = Math.max(80, label.length * size * 0.5 + 20);
+      const h = size + 12;
+      const color = (call.style && call.style.includes('#')) ? call.style.split('#').find(p=>p.includes('#')||p.match(/[0-9A-Fa-f]/)) : null;
+      const el = { type:'button', label, x, y, size, w, h, color: '#444', onclick: null };
+      this.ui.push(el);
+      return;
+    }
+    if (name === 'text'){
+      const txt = args[0]; const size = Number(args[1] || 16);
+      const color = (call.style && call.style.includes('#')) ? call.style.split('#').find(p=>p.includes('#')) : this.currentColor;
+      this.ui.push({ type:'text', text: txt, x: 20, y: 20 + this.ui.length * (size + 6), size, color: color || '#fff' });
+      return;
+    }
+    if (name === 'items'){
+      this.log('items: '+JSON.stringify(args));
+      if (args[0] === 'purchase'){
+        this.vars._purchased = this.vars._purchased || {};
+        this.vars._purchased[args[1]] = true;
+        this.log('purchased '+args[1]);
+      }
+      return;
+    }
+    // fallback
+    this.log('unhandled call: '+name+' args='+JSON.stringify(args));
+  }
+
+  attachOnclickHandlersFromSource(){
+    // naive scan: for each 'button' line in source, if next lines contain 'if onclick ( ... )' attach handler
+    const lines = this.source.split(/\r?\n/).map(l=>l.trim());
+    for (let i=0;i<lines.length;i++){
+      const ln = lines[i];
+      if (ln.startsWith('button')){
+        // gather onclick block if present up to a few lines
+        for (let j=i+1;j<Math.min(i+8, lines.length); j++){
+          const nxt = lines[j];
+          if (nxt.startsWith('if onclick')){
+            // collect between parentheses
+            const block = [];
+            let k=j, depth=0, started=false;
+            while (k<lines.length){
+              const L = lines[k];
+              if (L.includes('(')){ depth += (L.split('(').length - 1); started = true; }
+              if (L.includes(')')) depth -= (L.split(')').length - 1);
+              if (started && k !== j) block.push(L);
+              k++;
+              if (started && depth <= 0) break;
+            }
+            // create handler executing a minimal subset (items "purchase" "uuid")
+            const handler = (rt) => {
+              for (const bl of block){
+                const m = bl.match(/items\s+"?([^"\s]+)"?\s+"?([0-9a-fA-F]+)"?/);
+                if (m){ const cmd=m[1], uuid=m[2];
+                  if (cmd === 'purchase'){ rt.vars._purchased = rt.vars._purchased || {}; rt.vars._purchased[uuid] = true; rt.log('purchased via onclick '+uuid); }
+                }
+              }
+            };
+            // attach to last button without handler
+            for (let b=this.ui.length-1;b>=0;b--){
+              if (this.ui[b].type==='button' && !this.ui[b].onclick){ this.ui[b].onclick = handler; break; }
+            }
+          }
+        }
+      }
+    }
+  }
+
+  _loop(){
+    if (!this.running) return;
+    this.render();
+    this._raf = requestAnimationFrame(()=>this._loop());
+  }
+
+  render(){
+    const ctx = this.ctx;
+    ctx.clearRect(0,0,this.canvas.width,this.canvas.height);
+    ctx.save();
+    ctx.translate(this.offset.x, this.offset.y);
+    // background
+    ctx.fillStyle = '#000';
+    ctx.fillRect(-this.offset.x, -this.offset.y, this.canvas.width, this.canvas.height);
+
+    // draw UI
+    for (const el of this.ui){
+      if (el.type === 'button'){
+        const mx = this.mouse.x - this.offset.x;
+        const my = this.mouse.y - this.offset.y;
+        const hover = (mx >= el.x && mx <= el.x + el.w && my >= el.y && my <= el.y + el.h);
+        ctx.fillStyle = hover ? '#666' : (el.color || '#444');
+        ctx.fillRect(el.x, el.y, el.w, el.h);
+        ctx.strokeStyle = '#222'; ctx.strokeRect(el.x, el.y, el.w, el.h);
+        ctx.fillStyle = '#fff';
+        ctx.font = `${el.size}px sans-serif`;
+        ctx.fillText(el.label, el.x + 10, el.y + el.size + 2);
+      } else if (el.type === 'text'){
+        ctx.fillStyle = el.color || '#fff';
+        ctx.font = `${el.size}px sans-serif`;
+        const text = (typeof el.text === 'string') ? el.text : (this.vars[el.text] || '');
+        ctx.fillText(text, el.x, el.y);
+      }
+    }
+
+    ctx.restore();
+  }
+}
+
+// helper: set dotted var e.g., "window.width"
+function setVarFromDotted(vars, dotted, value){
+  const parts = dotted.split('.');
+  let cur = vars;
+  for (let i=0;i<parts.length-1;i++){
+    const p = parts[i];
+    if (!cur[p]) cur[p] = {};
+    cur = cur[p];
+  }
+  cur[parts[parts.length-1]] = value;
+}
+
+// export global
+window.OSLRunner = OSLRunner;
+
+// -------------------------
+// Example usage (demo)
+// -------------------------
+const sample = `
+msg = ""
+
+window.width = 400
+window.height = 400
+window "resizable" false
+rotur "advert" "250x250" "mist"
+mainloop:
+
+owned = itemOwns("ae5f656a31d53d745c51d592b89193ac")
+
+if owned (
+    msg = "You are Rich!"
+) else (
+    msg = "You are poor :("
+    goto 0 -20
+    c #444
+    button "become rich" 200 40 10 : hover_c#555
+    if onclick (
+        items "purchase" "ae5f656a31d53d745c51d592b89193ac"
+    )
+)
+
+goto msg.len * -10 50
+text msg 20 : c#fff
+
+import "win-buttons"
+`;
+
+const fns = `save_access = system_url.contains("embed=").not()
+
+if save_access (
+  save "fortniteskibidi@rattusdong" "set_directory"
+
+  if "highscore.txt".saveExists() (
+    highscore = "highscore.txt".saveGet()
+  ) else (
+    save "highscore.txt" "set" 0
+    highscore = 0
+  )
+) else (
+  highscore = 0
+)
+
+def shootgun() (
+  turnleft 45
+  shotx = -250 + (90 * direction.sin()) 
+  shoty = 0 + (90 * direction.cos())
+  shotd = direction + 180
+  
+  sound "shoot" "start" 0
+  if contr (
+    void gamepads[1].haptic({
+      duration: 300,
+      weakMagnitude: 0.0,
+      strongMagnitude: 0.5
+    })
+  )
+  ready = false
+  cooldown = 20
+)
+
+sound "https://github.com/RattusDong/apps/raw/refs/heads/main/all/fortnite%20skibidi%202024/assets/shotgun.mp3" "load" "shoot"
+sound "shoot" "volume" 0.8
+sound "https://github.com/RattusDong/apps/raw/refs/heads/main/all/fortnite%20skibidi%202024/assets/hit.mp3" "load" "kill"
+sound "kill" "volume" 1.0
+window "show"
+window "dimensions" 800 450
+window "resizable" false
+
+shotTimer = 0
+
+skibX = 600
+skibY = random(-200,200)
+speed = 1
+score = 0
+dead = false
+dieOff = 0
+click = flase
+sgwidth = 0
+cooldown = 0
+ready = false
+shotx = 3000
+shoty = 3000
+shotd = 90
+updown = 0
+contr = false
+
+mainloop:
+array gamepads = getGamepads()
+if gamepads.len > 0 (
+  gamepad @= gamepads[1]
+  contr = true
+)
+
+goto 0 0
+image "https://raw.githubusercontent.com/RattusDong/apps/main/all/fortnite%20skibidi%202024/assets/background.png" 850
+goto -300 -100 + dieOff
+image "https://raw.githubusercontent.com/RattusDong/apps/main/all/fortnite%20skibidi%202024/assets/jonsey.png" 500
+
+goto skibX skibY
+image "https://raw.githubusercontent.com/RattusDong/apps/main/all/fortnite%20skibidi%202024/assets/skibidi.png" 80 120
+if mouse_touching (
+  cursor "crosshair"
+)
+if dist(shotx, shoty, skibX, skibY) < 80 and skibX < 425 (
+  sound "kill" "start" 0
+  skibX = 500 + random(0,150)
+  speed += 0.1
+  score ++
+  if contr ( 
+    void gamepads[1].haptic({
+      duration: 400,
+      weakMagnitude: 0.9,
+      strongMagnitude: 0.2
+    })
+  )
+  if score > highscore (
+    if save_access (
+      save "highscore.txt" "set" score
+    )
+    highscore = score
+  )
+  skibY = random(-200,200)
+)
+if skibX < -200 (
+  dead = true
+)
+
+
+goto -180 200
+text "Skibidi Kills: " ++ score 20 : c#fff
+goto -150 170
+text "Highest: " ++ highscore 16
+
+
+direction shotd
+goto shotx shoty
+effect "transparency" 0 + (cooldown - 16) * 25
+image "https://raw.githubusercontent.com/RattusDong/apps/main/all/fortnite%20skibidi%202024/assets/shotgunproj.png" 10 + (dist(shotx, shoty, -250, 0) * 0.35)
+ 
+shotx += -80 * direction.sin
+shoty += -80 * direction.cos
+
+effect "transparency" 0
+
+goto -230 0 + dieOff
+
+if contr (
+  stickX = gamepads[1].axes[1].x
+  stickY = gamepads[1].axes[1].y
+  if stickX.abs() < 0.15 and stickY.abs() < 0.15 (
+    stickX = slx
+    stickY = sly
+  )
+  goto 0 0
+  pointat stickX stickY
+  goto -230 0 + dieOff
+  slx = stickX
+  sly = stickY
+) else (
+  pointat mouse_x mouse_y
+)
+turnleft 90
+direction direction.clamp(-60,60) + (-10 + ((cooldown - 16) * -1)).clamp(-14,0)
+turnright 135
+image "https://raw.githubusercontent.com/RattusDong/apps/main/all/fortnite%20skibidi%202024/assets/shotgun.png" 180 - sgwidth
+if cooldown > 8 (
+  effect "transparency" 0 + (cooldown - 14) * -16
+  image "https://raw.githubusercontent.com/RattusDong/apps/main/all/fortnite%20skibidi%202024/assets/shotgunshoot.png" 310 320
+)
+effect "transparency" 0
+if mouse_down or gamepad.buttons[8]["pressed"] and cooldown <= 0 (
+  sgwidth = (sgwidth + 1).clamp(0,10)
+  if sgwidth == 8 (
+    if contr (
+      void gamepads[1].haptic({
+        duration: 600,
+        weakMagnitude: 0.05,
+        strongMagnitude: 0.0
+      })
+    )
+    ready = true
+  )
+) else (
+  sgwidth = 0
+)
+if contr (
+  if gamepad.buttons[8]["pressed"].not and ready and dead.not() (
+    shootgun()
+  )
+) else if mouse_down.not() and ready and dead.not() (
+  shootgun()
+)
+
+
+cooldown -= 1
+
+direction 90
+if dead (
+  goto 0 -150
+  image "https://raw.githubusercontent.com/RattusDong/apps/main/all/fortnite%20skibidi%202024/assets/fire.png" 800 500
+ 
+  goto -200 0
+  if contr (
+  text "Press A to restart" 15
+
+  void gamepads[1].haptic({
+    duration: 200,
+    weakMagnitude: 1.0,
+    strongMagnitude: 1.0
+  })
+  ) else (
+  text "Press Space to restart" 15
+  )
+
+  dieOff = 2000
+
+  if "space".isKeyDown() or gamepad.buttons[1]["pressed"] or gamepad.buttons[2]["pressed"] (
+    dead = false
+    dieOff = 0
+    score = 0
+    skibX = 600
+    skibY = random(-200,200)
+    speed = 1
+    ready = false
+    cooldown = 0
+  )
+
+)
+
+skibX -= speed
+
+loc -2 2 -20 -20
+square 20 20 10 : c#222
+icon "w 4 line 10 10 -10 -10 line -10 10 10 -10" 0.7 : c#fff
+if clicked (
+  window "stop"
+)
+
+// special thanks to rattus
+
+// updated by mist to replace old syntax with more modern equivalents`
+
+const container = document.getElementById('demoWrap');
+const r = new OSLRunner(container, fns, { onLog: (m)=>defaultLogger('[OSL] '+m) });
+r.start();
+
+</script>
+</body>
+</html>
