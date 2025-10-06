@@ -1,21 +1,12 @@
 import { EventEmitter } from "events";
-
-export type Service = {
-    name: string;
-    init?: (kernel: H2OKernel) => Promise<void> | void;
-    shutdown?: () => Promise<void> | void;
-    [key: string]: any;
-};
-
-export type KernelConfig = {
-    name: string;
-    version: string;
-    env?: Record<string, string>;
-    debug?: boolean;
-};
+import type { Service } from "src/ts/types/service";
+import type { KernelConfig } from "src/ts/types/kernel";
+import { KMods } from "../stores/kernelmods";
+import type { KMod } from "../types/kmod";
+import { log, error } from "../logging/main";
 
 export class H2OKernel extends EventEmitter {
-    private services = new Map<string, Service>();
+    private kmods: Record<string, KMod | (new (kernel: H2OKernel) => KMod)> = KMods;
     private started = false;
     public config: KernelConfig;
 
@@ -32,77 +23,88 @@ export class H2OKernel extends EventEmitter {
 
     async start(): Promise<void> {
         if (this.started) return;
-        this.log("[KERNEL]", `Starting kernel ${JSON.stringify(this.config)}`);
+        log("[KERNEL]", `Starting kernel ${JSON.stringify(this.config)}`);
         this.emit("startup:begin");
 
         try {
             await this.initServices();
             this.started = true;
             this.emit("startup:done");
-            this.log("[KERNEL]", "Kernel started");
-            throw new Error("Tests")
+            window["kernel"] = this;
+            log("[KERNEL]", "Kernel started");
         } catch (err) {
             this.emit("startup:error", err);
-            this.handleError(err);
+            this.handleError(err as Error);
             throw err;
         }
     }
 
     async stop(): Promise<void> {
         if (!this.started) return;
-        this.log("[KERNEL]", "Shutting down kernel");
+        log("[KERNEL]", "Shutting down kernel");
         this.emit("shutdown:begin");
         try {
             await this.shutdownServices();
             this.started = false;
             this.emit("shutdown:done");
-            this.log("[KERNEL]", "Kernel stopped");
+            log("[KERNEL]", "Kernel stopped");
         } catch (err) {
             this.emit("shutdown:error", err);
-            this.handleError(err);
+            this.handleError(err as Error);
             throw err;
         }
     }
 
     async restart(): Promise<void> {
-        this.log("[KERNEL]", "Restarting kernel");
+        log("[KERNEL]", "Restarting kernel");
         await this.stop();
         await this.start();
     }
 
-    registerService<S extends Service>(service: S): S {
+    registerService<S extends KMod>(ModClass: new (kernel: H2OKernel) => S): S {
+        const service = new ModClass(this);
         if (!service || !service.name) {
             throw new Error("Service must have a name");
         }
-        if (this.services.has(service.name)) {
+        if (this.kmods[service.name]) {
             throw new Error(`Service already registered: ${service.name}`);
         }
-        this.services.set(service.name, service);
-        this.emit("service:registered", service.name);
-        this.log("[SVCMAN]", `Service registered: ${service.name}`);
+        this.kmods[service.name] = service;
+        this.emit("kmod:registered", service.name);
+        log("[KMOD]", `Service registered: ${service.name}`);
         return service;
     }
 
     getService<T extends Service = Service>(name: string): T | undefined {
-        return this.services.get(name) as T | undefined;
+        return this.kmods[name] as T | undefined;
     }
 
     private async initServices(): Promise<void> {
-        for (const service of Array.from(this.services.values())) {
+    for (const [name, ModClass] of Object.entries(this.kmods)) {
+        try {
+            // Create instance of the module
+            const service = new ModClass(this);
+            // Store the instance
+            this.kmods[name] = service;
+            
             if (typeof service.init === "function") {
-                this.log("Initializing service", service.name);
-                await service.init(this);
+                log("[KERNEL]", `Initializing service: ${service.name}`);
+                await service.init();
                 this.emit("service:ready", service.name);
             }
+        } catch (err) {
+            error("[KERNEL]", `Failed to initialize service ${name}: ${err}`);
+            throw err;
         }
     }
+}
 
     private async shutdownServices(): Promise<void> {
         // Shutdown in reverse registration order
-        const services = Array.from(this.services.values()).reverse();
+        const services = Object.values(this.kmods).reverse();
         for (const service of services) {
             if (typeof service.shutdown === "function") {
-                this.log("Shutting down service", service.name);
+                log("Shutting down service", service.name);
                 await service.shutdown();
                 this.emit("service:shutdown", service.name);
             }
@@ -118,19 +120,8 @@ export class H2OKernel extends EventEmitter {
         }
     }
 
-    public log(from: string, content: string) {
-        let currentTime: Number = new Date().getTime()
-
-        console.log(`[${currentTime}] ${from}: ${content}`)
-    }
-
-    public error(from: string, content: string) {
-        let currentTime: Number = new Date().getTime()
-        console.error(`[!] [${currentTime}] ${from}: ${content}`)
-    }
-
     private handleError(e: Error) {
-        this.error("[KERNEL]", `KERNEL ERROR DETECTED! TERMINATING. ${e.stack}`)
+        error("[KERNEL]", `KERNEL ERROR DETECTED! TERMINATING. ${e.stack}`)
 
         this.stop();
 
