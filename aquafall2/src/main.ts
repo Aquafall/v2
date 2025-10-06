@@ -8,6 +8,8 @@ Starting up. Have fun!`)
     let kernel: H2OKernel = new H2OKernel(config)
 
     kernel.start()
+
+    // load app.svelte
 }
 
 Main() // we gotta start
