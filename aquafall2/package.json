@@ -14,5 +14,8 @@
   },
   "resolutions": {
     "vite": "npm:rolldown-vite@7.1.14"
+  },
+  "dependencies": {
+    "svelte": "^5.39.9"
   }
 }

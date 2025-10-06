@@ -1,11 +1,12 @@
-import { EventEmitter } from "events";
 import type { Service } from "src/ts/types/service";
 import type { KernelConfig } from "src/ts/types/kernel";
 import { KMods } from "../stores/kernelmods";
 import type { KMod } from "../types/kmod";
 import { log, error } from "../logging/main";
+import { SimpleEventEmitter } from "../events/emitterlib";
+import type { Kernel } from "src/ts/types/kernel";
 
-export class H2OKernel extends EventEmitter {
+export class H2OKernel extends SimpleEventEmitter implements Kernel {
     private kmods: Record<string, KMod | (new (kernel: H2OKernel) => KMod)> = KMods;
     private started = false;
     public config: KernelConfig;
@@ -36,6 +37,15 @@ export class H2OKernel extends EventEmitter {
             this.emit("startup:error", err);
             this.handleError(err as Error);
             throw err;
+        }
+    }
+
+    async crash() {
+        try {
+            throw new Error("Manually invoked crash");
+        } catch (err) {
+            this.emit("kernel:crash");
+            this.handleError(err as Error);
         }
     }
 

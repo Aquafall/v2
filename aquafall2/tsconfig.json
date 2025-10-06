@@ -25,7 +25,9 @@
     /* Paths */
     "baseUrl": ".",
     "paths": {
-      "$*": ["src/*"]  // Adjust this path based on your project structure
+      "$ts/*": ["src/ts/*"],
+      "$apps/*": ["src/apps/*"],
+      "$states/*": ["src/states/*"],
     }
   },
   "include": ["src"]

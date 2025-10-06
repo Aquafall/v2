@@ -1,12 +1,12 @@
 // Handles all user-related services and processes
 // kernel/modules/user/main.ts
 
-import type { KMod } from "../../../types/kmod";
+import { KMod } from "../../../types/kmod";
 import { H2OKernel } from "../../../kernel/h2o";
 import { KMods } from "../../../stores/kernelmods";
 import { log, error } from "../../../logging/main";
 
-export class UserKMod implements KMod {
+export class UserKMod extends KMod {
     kernel: H2OKernel;
     name: string;
     constructor(kernel: H2OKernel) {
