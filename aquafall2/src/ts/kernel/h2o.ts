@@ -31,7 +31,7 @@ export class H2OKernel extends SimpleEventEmitter implements Kernel {
             await this.initServices();
             this.started = true;
             this.emit("startup:done");
-            window["kernel"] = this;
+            window['kernel'] = this;
             log("[KERNEL]", "Kernel started");
         } catch (err) {
             this.emit("startup:error", err);
