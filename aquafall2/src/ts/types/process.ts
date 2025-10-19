@@ -1,15 +1,6 @@
 import type { Service } from "./service";
+import type { ProcessInfo } from "./processInfo";
 
-export class Process {
-    private pid!: Number;
-    private parentService!: Service;
-
-    constructor(pid: Number, parentService: Service) {
-        this.pid = pid;
-        this.parentService = parentService;
-    }
-
-    public stop() {
-        this.parentService.killProcess(this.pid);
-    }
+export interface Process extends ProcessInfo {
+    kill: () => boolean;
 }

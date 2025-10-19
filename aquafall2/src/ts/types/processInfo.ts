@@ -1,21 +1,8 @@
-export type ProcInfo = {
-    name?: String,
-    icon?: String,
-    version?: String,
-    description?: String,
-    category?: String,
-    supportedParams?: any[],
-    windowData?: {
-        defaultWidth: Number,
-        defaultHeight: Number,
-        maxWidth: Number,
-        maxHeight: Number,
-        minWidth: Number,
-        minHeight: Number,
-        maximised: Boolean,
-        minimised: Boolean,
-        headless: Boolean,
-        resizable: Boolean,
-    },
-    core?: Boolean,
+export interface ProcessInfo {
+    pid: number;
+    name: string;
+    status: 'running' | 'stopped' | 'suspended';
+    startTime: number;
+    type: 'system' | 'user' | 'background';
+    metadata: Record<string, any>;
 }

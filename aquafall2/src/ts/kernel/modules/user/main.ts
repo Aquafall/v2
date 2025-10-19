@@ -10,6 +10,7 @@ export class UserKMod extends KMod {
     kernel: H2OKernel;
     name: string;
     constructor(kernel: H2OKernel) {
+        super();
         this.kernel = kernel;
         this.name = "UserInterfaceModule";
     }
