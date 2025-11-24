@@ -2,7 +2,7 @@ name: Deploy Svelte to GitHub Pages
 
 on:
   push:
-    branches: [ main ]  # or your default branch
+    branches: [ main ]
   workflow_dispatch:
 
 permissions:
@@ -27,15 +27,13 @@ jobs:
         with:
           node-version: 20
           cache: 'npm'
-          
-      - name: change dir
-        run: cd ./aquafall2/
-
 
       - name: Install dependencies
-        run: npm i
+        working-directory: ./aquafall2
+        run: npm install
 
       - name: Build project
+        working-directory: ./aquafall2
         run: npm run build
 
       - name: Setup Pages
@@ -44,8 +42,8 @@ jobs:
       - name: Upload artifact
         uses: actions/upload-pages-artifact@v4
         with:
-          path: ./dist  # Vite builds to dist by default
-          
+          path: ./aquafall2/dist
+
   deploy:
     needs: build
     runs-on: ubuntu-latest
