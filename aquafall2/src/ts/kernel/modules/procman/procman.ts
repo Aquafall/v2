@@ -2,7 +2,8 @@ import { KMod } from "../../../types/kmod";
 import { H2OKernel } from "../../h2o";
 import { log } from "../../../logging/main";
 import { writable } from "svelte/store";
-import type { Process, ProcessInfo } from "../../../types/process";
+import type { Process } from "../../../types/process";
+import type { ProcessInfo } from "$ts/types/processInfo";
 
 export class ProcessManager extends KMod {
     private processes: Map<number, Process> = new Map();

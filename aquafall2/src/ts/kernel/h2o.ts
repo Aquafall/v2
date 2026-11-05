@@ -133,6 +133,10 @@ export class H2OKernel extends SimpleEventEmitter implements Kernel {
     private handleError(e: Error) {
         error("[KERNEL]", `KERNEL ERROR DETECTED! TERMINATING. ${e.stack}`)
 
+        let tempCrashElem: HTMLBodyElement = document.createElement("body")
+        tempCrashElem.innerHTML = "AquafallCrashHandler <br/>" + e.stack;
+        document.body = tempCrashElem;
+
         this.stop();
 
         return true;

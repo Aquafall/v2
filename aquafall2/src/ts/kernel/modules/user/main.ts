@@ -8,16 +8,20 @@ import { log, error } from "../../../logging/main";
 
 // Import all User-related services and processes here
 import { AquafallRenderer } from "../../../renderer/main";
+import { WindowStore } from "../../../../ts/stores/windows";
 
 export class UserKMod extends KMod {
     kernel: H2OKernel;
     name: string;
     renderer: AquafallRenderer;
+    windowstore: WindowStore;
+
     constructor(kernel: H2OKernel) {
         super();
         this.kernel = kernel;
         this.name = "UserInterfaceModule";
         this.renderer = new AquafallRenderer();
+        this.windowstore = new WindowStore();
     }
 
     init = async () => {
