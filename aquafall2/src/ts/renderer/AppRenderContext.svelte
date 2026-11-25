@@ -1,10 +1,11 @@
 <script lang="ts">
-    import { WindowStore } from "../../ts/stores/windows";
+    import { onMount, tick } from "svelte";
+    import { windowStore } from "./main";
 </script>
 
 <main>
     <div class="apprenderer" id="apprenderer">
-        {#each WindowStore.windows as window }
+        {#each windowStore.windows as window }
             <div> {window.name} </div>
         {/each}
     </div>

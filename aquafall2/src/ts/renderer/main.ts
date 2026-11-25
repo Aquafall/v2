@@ -3,6 +3,12 @@ import AppRenderContext from "./AppRenderContext.svelte";
 import { mount } from "svelte";
 import { H2OKernel } from "../kernel/h2o";
 import { log, error } from "../logging/main";
+import { WindowStore } from "../stores/windows";
+import { loadedModules } from "../stores/apps.ts";
+
+let windowStore = new WindowStore();
+
+export { windowStore };
 
 export class AquafallRenderer implements Service {
     name = "AquafallRendererService";
@@ -24,5 +30,10 @@ export class AquafallRenderer implements Service {
     async start() {
         const renderer = mount(AppRenderContext, { target: document.getElementById("app") });
         this.renderer = renderer;
+        windowStore.testInit();
+    }
+
+    async spawnApp(id: string) {
+
     }
 }

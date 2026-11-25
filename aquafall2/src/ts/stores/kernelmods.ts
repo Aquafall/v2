@@ -2,14 +2,11 @@ import { kernel } from "../kernel/h2o";
 import type { KMod } from "../types/kmod";
 import { UserKMod } from "../kernel/modules/user/main";
 import { ProcessManager } from "../kernel/modules/procman/procman";
+import{ BugRepKMod } from "../kernel/modules/bugrep/main";
 
 export let KMods: Record<string, KMod> = {
-    /*bugrep: {
-        name: "bugrep",
-        init: async (kernel) => {
-            console.log("bugrep initialized");
-        }
-    },*/
+    bugrep: BugRepKMod,
+
     user: UserKMod,
     
     process: ProcessManager,
